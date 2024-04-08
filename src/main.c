@@ -3577,6 +3577,7 @@ static int do_direct_write_leader(void)
 {
 	struct leader_record leader;
 	char *res_str = NULL;
+	// 这是判断什么呀？这com.res_args[0]存储的是-r参数传入的值
 	int is_ls = com.res_args[0] ? 0 : 1;
 	int rv;
 

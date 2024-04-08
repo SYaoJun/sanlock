@@ -795,7 +795,7 @@ From sanlock(8) at sanlock.git/src/sanlock.8
 
        The owner of the requested resource will not know of the request unless
        it  is  explicitly  told  to  examine  its  resources via the "examine"
-       api/command, or otherwise notfied.
+       api/command, or otherwise notified.
 
        The second part of making a request is  notifying  the  resource  lease
        owner  that  it  should  examine  the  request  records of its resource
@@ -863,11 +863,11 @@ From sanlock(8) at sanlock.git/src/sanlock.8
        · read_ms/write_ms   are   the   milliseconds  taken  for  the  renewal
          read/write ios.
 
-       · next_timeouts are the number of io timeouts that  occured  after  the
+       · next_timeouts are the number of io timeouts that  occurred  after  the
          renewal recorded on that line, and before the next successful renewal
          on the following line.
 
-       · next_errors are the number of io errors (not timeouts)  that  occured
+       · next_errors are the number of io errors (not timeouts)  that  occurred
          after  renewal  recorded on that line, and before the next successful
          renewal on the following line.
 

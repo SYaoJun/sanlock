@@ -273,6 +273,9 @@ static int write_leader(struct task *task,
  * for manually clobbering the disk to corrupt it for testing, or to manually
  * repair it after it's corrupted.
  */
+/*
+这不应该用于写leader记录，它只意味着手动破坏磁盘以进行测试，或者在磁盘损坏后手动修复它。
+*/
 
 int paxos_lease_leader_clobber(struct task *task,
 			       struct token *token,
@@ -405,7 +408,7 @@ static int verify_dblock(struct token *token, struct paxos_dblock *pd, uint32_t 
 
 /*
  * It's possible that we pick a bk_max from another host which has our own
- * inp values in it, and we can end up commiting our own inp values, copied
+ * inp values in it, and we can end up committing our own inp values, copied
  * from another host's dblock:
  *
  * host2 leader free
@@ -1618,7 +1621,7 @@ static int write_new_leader(struct task *task,
 
 /*
  * If we hang or crash after completing a ballot successfully, but before
- * commiting the leader_record, then the next host that runs a ballot (with the
+ * committing the leader_record, then the next host that runs a ballot (with the
  * same lver since we did not commit the new lver to the leader_record) will
  * commit the same inp values that we were about to commit.  If the inp values
  * they commit indicate we (who crashed or hung) are the new owner, then the
@@ -1627,6 +1630,15 @@ static int write_new_leader(struct task *task,
  * "enough time" ensures that if we hung before writing the leader, that we
  * won't wake up and finally write what will then be an old invalid leader.
  */
+
+/*
+ * 如果在成功完成选票后，但在提交leader_record之前挂起或崩溃，那么下一个运行选票的主机
+ * （因为我们没有将新的lver提交到leader_record，所以lver相同）将提交与我们即将提交的相同的inp值。
+ * 如果他们提交的inp值表明我们（即崩溃或挂起的主机）是新的所有者，那么其他主机将开始监视我们主机的活动状态。
+ * 一旦足够的时间过去，它们就会假设我们已经死亡，然后继续进行新版本。足够的时间确保如果我们在编写leader之前挂起，
+ * 我们不会醒来并最终编写一个旧的无效leader。
+ * lver是什么？
+*/
 
 /*
  * i/o required to acquire a free lease
@@ -1644,6 +1656,18 @@ static int write_new_leader(struct task *task,
  * 				6 i/os = 3 1MB reads, 3 512 byte writes
  */
 
+/*
+0. 读   1MB
+-------------
+1. p1写 512B
+2. p1读 1MB
+3. p2写 512B
+4. p2读 1MB
+5. 写   512B
+----------------
+共计: 3次读 3*1MB，3次写  3*512B
+*/
+
 int paxos_lease_acquire(struct task *task,
 			struct token *token,
 			uint32_t flags,
@@ -1653,10 +1677,12 @@ int paxos_lease_acquire(struct task *task,
 		        int new_num_hosts)
 {
 	struct sync_disk host_id_disk;
+	/*这几个leader有什么用？*/
 	struct leader_record host_id_leader;
 	struct leader_record cur_leader;
 	struct leader_record tmp_leader;
 	struct leader_record new_leader;
+
 	struct paxos_dblock dblock;
 	struct paxos_dblock owner_dblock;
 	struct host_status hs;
@@ -1674,7 +1700,7 @@ int paxos_lease_acquire(struct task *task,
 	int other_io_timeout, other_host_dead_seconds;
 
 	memset(&dblock, 0, sizeof(dblock)); /* shut up compiler */
-
+	/*token是什么？*/
 	log_token(token, "paxos_acquire begin offset %llu 0x%x %d %d",
 		  (unsigned long long)token->disks[0].offset, flags,
 		  token->sector_size, token->align_size);
@@ -1689,6 +1715,7 @@ int paxos_lease_acquire(struct task *task,
 	copy_cur_leader = 0;
 
 	/* acquire io: read 1 */
+	/*1.这里会读1MB，目的是干啥呢？*/
 	error = paxos_lease_read(task, token, flags, &cur_leader, &max_mbal, "paxos_acquire", 1);
 	if (error < 0)
 		goto out;
@@ -2133,8 +2160,8 @@ int paxos_lease_acquire(struct task *task,
 		 * The LFL_SHORT_HOLD flag is just a "hint" to help
 		 * other nodes be more intelligent about retrying
 		 * due to transient failures when acquiring shared
-		 * leases.  Only modify SHORT_HOLD if we're commiting
-		 * ourself as the new owner.  If we're commiting another
+		 * leases.  Only modify SHORT_HOLD if we're committing
+		 * ourself as the new owner.  If we're committing another
 		 * host as owner, we don't know if they are acquiring
 		 * shared or not.
 		 */
@@ -2254,9 +2281,9 @@ int paxos_lease_release(struct task *task,
 
 	/*
 	 * This will happen when two hosts finish the same ballot
-	 * successfully, the second commiting the same inp values
+	 * successfully, the second committing the same inp values
 	 * that the first did, as it should.  But the second will
-	 * write it's own write_id/gen/timestap, which will differ
+	 * write it's own write_id/gen/timestamp, which will differ
 	 * from what the first host wrote.  So when the first host
 	 * rereads here in the release, it will find different
 	 * write_id/gen/timestamp from what it wrote.  This is
@@ -2274,6 +2301,7 @@ int paxos_lease_release(struct task *task,
 	 * another host writing a new leader, and we could clobber the
 	 * new leader.
 	 */
+	/*这里为什么要跟token判断呀？token都没赋值过肯定没数据呀？*/
 	if (leader.write_id != token->host_id) {
 		log_warnt(token, "paxos_release skip write "
 			  "last lver %llu owner %llu %llu %llu writer %llu %llu %llu "
@@ -2297,7 +2325,7 @@ int paxos_lease_release(struct task *task,
 
 	/*
 	 * When we were the writer of our own leader record, then
-	 * releasing the lease includes both setting the REALEASED flag
+	 * releasing the lease includes both setting the RELEASED flag
 	 * in our dblock and clearing out timestamp in the leader.
 	 * When we reread the leader here in release, we should find
 	 * it the same as we last saw in acquire.

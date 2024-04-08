@@ -184,6 +184,7 @@ static int do_paxos_action(int action, struct task *task, int io_timeout, struct
 		break;
 
 	case ACT_ACQUIRE:
+		// 加锁
 		if (!sector_size || !align_size) {
 			rv = direct_read_leader_sizes(task, &token->disks[0], &sector_size, &align_size);
 			if (rv < 0)

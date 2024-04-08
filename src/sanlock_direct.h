@@ -15,7 +15,9 @@
  *
  * (Old api, see write_lockspace/resource)
  */
-
+/*
+1. 初始化lockspace和resource
+*/
 int sanlock_direct_init(struct sanlk_lockspace *ls,
                         struct sanlk_resource *res,
                         int max_hosts_unused, int num_hosts, int use_aio);
@@ -24,7 +26,9 @@ int sanlock_direct_init(struct sanlk_lockspace *ls,
  * write a lockspace to disk
  * (also see sanlock_write_lockspace)
  */
-
+/*
+2. 写入lockspace
+*/
 int sanlock_direct_write_lockspace(struct sanlk_lockspace *ls, int max_hosts_unused,
 				   uint32_t flags, uint32_t io_timeout);
 
@@ -32,7 +36,9 @@ int sanlock_direct_write_lockspace(struct sanlk_lockspace *ls, int max_hosts_unu
  * format a resource lease area on disk
  * (also see sanlock_write_resource)
  */
-
+/*
+3. 写入resource
+*/
 int sanlock_direct_write_resource(struct sanlk_resource *res,
 				  int max_hosts_unused, int num_hosts, uint32_t flags);
 
@@ -40,7 +46,9 @@ int sanlock_direct_write_resource(struct sanlk_resource *res,
  * Returns the alignment in bytes required by sanlock_direct_init()
  * (1MB for disks with 512 sectors, 8MB for disks with 4096 sectors)
  */
-
+/*
+1.1 字节对齐，初始化时使用
+*/
 int sanlock_direct_align(struct sanlk_disk *disk);
 
 #endif
