@@ -405,7 +405,12 @@ static int verify_dblock(struct token *token, struct paxos_dblock *pd, uint32_t 
 
 	return SANLK_OK;
 }
-
+/*
+有可能我们从另一个具有我们自己 inp 值的主机中选择了一个 bk_max，
+并且我们最终会提交我们自己从另一个主机的 dblock 中复制的 inp 值。
+---------------------------------------------------------------
+通过什么方式判断leader是free的，是通过时间戳吗？？？leader.timestamp == LEASE_FREE
+*/
 /*
  * It's possible that we pick a bk_max from another host which has our own
  * inp values in it, and we can end up committing our own inp values, copied
@@ -694,6 +699,7 @@ static int run_ballot(struct task *task, struct token *token, uint32_t flags,
 		dblock.inp2 = bk_max.inp2;
 		dblock.inp3 = bk_max.inp3;
 	} else {
+		// 如果是空集，就直接设置我们传入的值
 		/* lver and mbal are already set */
 		dblock.inp = token->host_id;
 		dblock.inp2 = token->host_generation;
@@ -895,6 +901,12 @@ static int run_ballot(struct task *task, struct token *token, uint32_t flags,
 		 * us owning the lease on disk.  With this flag, the release path will
 		 * try to ensure we are not and do not become the lease owner.
 		 */
+		/*
+		在第二阶段之后，即使我们没有完成选举，我们也可能会“获胜”，因为另一个主机可能会选择并提交我们的 dblock 值。如果我们中止获取，但被授予租约，那么这将使我们在磁盘上拥有租约。
+		通过此标志，释放路径将尝试确保我们不是租约的所有者，也不会成为租约的所有者。
+		-------------
+		这个标识应该会在后面会用到
+		*/
 		token->flags |= T_RETRACT_PAXOS;
 
 		log_errot(token, "ballot %llu retract error %d",
@@ -1549,6 +1561,18 @@ static int _lease_read_num(struct task *task,
  * values from it.
  */
 
+/**
+ * 读取启动磁盘 Paxos 所需的所有初始值：
+- 领导者记录
+- 我们自己的 dblock
+- 所有 dblocks 的最大 mbal
+通过一个 I/O 读取整个租约区域，并从中复制所有这些值。
+1. leader block
+2. our block
+3. max bal
+ * 
+*/
+
 static int paxos_lease_read(struct task *task, struct token *token, uint32_t flags,
 			    struct leader_record *leader_ret,
 			    uint64_t *max_mbal, const char *caller, int log_bk_vals)
@@ -1657,13 +1681,15 @@ static int write_new_leader(struct task *task,
  */
 
 /*
-0. 读   1MB
+acquire io: read 1 在 retry_ballot 中第一次读
+0. 读   1MB ----> 读原来的leader
 -------------
 1. p1写 512B
 2. p1读 1MB
 3. p2写 512B
 4. p2读 1MB
-5. 写   512B
+-------------
+5. 写   512B ------> 写新的leader
 ----------------
 共计: 3次读 3*1MB，3次写  3*512B
 */
@@ -1715,7 +1741,11 @@ int paxos_lease_acquire(struct task *task,
 	copy_cur_leader = 0;
 
 	/* acquire io: read 1 */
-	/*1.这里会读1MB，目的是干啥呢？*/
+	/*1.这里会读1MB，目的是干啥呢？从这里读出cur_leader*/
+	/* 这个token很奇怪呀？读磁盘后记录的什么信息呢？ 
+	注意：这里是lease_read 不知道这种读有什么奇怪的地方
+	force acquire 有没有可能会在这里读失败？？？
+	*/
 	error = paxos_lease_read(task, token, flags, &cur_leader, &max_mbal, "paxos_acquire", 1);
 	if (error < 0)
 		goto out;
@@ -1744,7 +1774,7 @@ int paxos_lease_acquire(struct task *task,
 		copy_cur_leader = 1;
 		goto run;
 	}
-
+	// direct模式下这个acquire_lver=0
 	if (acquire_lver && cur_leader.lver != acquire_lver) {
 		log_errot(token, "paxos_acquire acquire_lver %llu cur_leader %llu",
 			  (unsigned long long)acquire_lver,
@@ -1752,14 +1782,14 @@ int paxos_lease_acquire(struct task *task,
 		error = SANLK_ACQUIRE_LVER;
 		goto out;
 	}
-
+	// 如果时间戳是0，则直接run
 	if (cur_leader.timestamp == LEASE_FREE) {
 		log_token(token, "paxos_acquire leader %llu free",
 			  (unsigned long long)cur_leader.lver);
 		copy_cur_leader = 1;
 		goto run;
 	}
-
+	// owner_id和token的id必须一致？？？token
 	if (cur_leader.owner_id == token->host_id &&
 	    cur_leader.owner_generation == token->host_generation) {
 		log_token(token, "paxos_acquire owner %llu %llu %llu is already local %llu %llu",
@@ -1838,6 +1868,7 @@ int paxos_lease_acquire(struct task *task,
 		  (unsigned long long)wait_start);
 
 	while (1) {
+		// 如果是direct模式也会走delta_lease判断么？这是获取什么？leader信息吗？
 		error = delta_lease_leader_read(task, ls_sector_size, token->io_timeout,
 						&host_id_disk,
 						cur_leader.space_name,
@@ -1859,7 +1890,7 @@ int paxos_lease_acquire(struct task *task,
 		   host_dead_seconds after the final renewal because
 		   a host_id must first be acquired before being freed,
 		   and acquiring cannot take less than host_dead_seconds */
-
+		// 如果时间戳是0则直接获取
 		if (host_id_leader.timestamp == LEASE_FREE) {
 			log_token(token, "paxos_acquire owner %llu delta free",
 				  (unsigned long long)cur_leader.owner_id);
@@ -1873,7 +1904,8 @@ int paxos_lease_acquire(struct task *task,
 		   the host_id that owns this lease may be alive, but it
 		   owned the lease in a previous generation without freeing it,
 		   and no longer owns it */
-
+		/*如果从磁盘读到的领导者host_id_leader，跟当前传进来的ID不同，或者磁盘上的Leader的gen更大，
+		那么就进入run*/ 
 		if (host_id_leader.owner_id != cur_leader.owner_id ||
 		    host_id_leader.owner_generation > cur_leader.owner_generation) {
 			log_token(token, "paxos_acquire owner %llu %llu %llu "
@@ -1886,7 +1918,7 @@ int paxos_lease_acquire(struct task *task,
 				  (unsigned long long)host_id_leader.timestamp);
 			goto run;
 		}
-
+		// 如果时间戳为空，那么什么时候设置时间戳为磁盘上读到的时间戳
 		if (!last_timestamp) {
 			last_timestamp = host_id_leader.timestamp;
 			goto skip_live_check;
@@ -1902,6 +1934,14 @@ int paxos_lease_acquire(struct task *task,
 		 * 2. If our own renewal thread saw the owner's timestamp change
 		 * the last time it was checked, then consider the owner to be alive.
 		 */
+		/*
+		* 检查所有者是否存活：
+		*
+		* 1. 我们刚刚读取了所有者（host_id_leader）的增量租约。
+		* 如果该增量租约的时间戳比我们自己续订线程上次看到的时间戳（last_timestamp）要新，则表示所有者存活。
+		*
+		* 2. 如果我们自己的续订线程在上次检查时看到了所有者的时间戳变化，则认为所有者存活。
+		*/
 
 		if ((host_id_leader.timestamp != last_timestamp) ||
 		    (hs.last_live && (hs.last_check == hs.last_live))) {
@@ -1944,7 +1984,8 @@ int paxos_lease_acquire(struct task *task,
 		/* If the owner hasn't renewed its host_id lease for
 		   host_dead_seconds then its watchdog should have fired by
 		   now. */
-
+		/* 如果所有者在 host_dead_seconds 时间内没有更新其主机 ID 租约，
+		则其看门狗应该已经触发了。 */
 		now = monotime();
 
 		other_io_timeout = hs.io_timeout;
@@ -1989,7 +2030,14 @@ int paxos_lease_acquire(struct task *task,
 		 * owner change in the meantime, we'll restart the entire
 		 * process.
 		 */
-
+		/*
+		* 在这个 while 循环中，我们正在等待当前所有者是存活还是死亡的指示，
+		* 但是如果在此期间看到领导者所有者发生变化，我们将重新启动整个过程。
+		*/
+		/*
+		* cur_leader: 是第一次读到的
+		* tmp_leader: 是刚刚读到的
+		*/
 		error = paxos_lease_leader_read(task, token, &tmp_leader, "paxos_acquire");
 		if (error < 0)
 			goto out;
@@ -2026,18 +2074,28 @@ int paxos_lease_acquire(struct task *task,
 	   re-reading of the leader here, i.e. we cannot just re-read the leader
 	   here, and make next_lver one more than that.  This is because another
 	   node may have made us the owner of next_lver as it is now. */
-
+	/*使用磁盘 Paxos 算法尝试提交新的领导者。
+	如果我们成功完成一轮选举，我们可以使用 next_lver 提交一个领导者记录。如果在选举期间发现了更高的 mbal，我们会增加自己的 mbal 并重新尝试选举。
+	next_lver 是从当前领导者（cur_leader）派生出来的，其所有者是零或超时。我们需要监视领导者记录，以查看另一个主机是否提交了一个带有 next_lver 的新 leader_record。
+	
+	待办事项：如果 dblock.inp 和 inp2 与当前的 host_id 和 generation 匹配，则可能不需要增加 mbal？
+	此次 next_lver 分配基于原始的 cur_leader，而不是此处重新读取领导者，即我们不能在此处重新读取领导者，然后将 next_lver 设置为比原始领导者更大一个。
+	这是因为另一个节点现在可能已经将我们指定为 next_lver 的所有者。
+	*/
+	
+	// 这里的lver是我们第一次读到的lver+1
 	next_lver = cur_leader.lver + 1;
-
+	// 如果最大提案号为0
 	if (!max_mbal) {
 		our_mbal = token->host_id;
 	} else {
+		// 如果提案号不为0，则增加全部的host数，然后加上自己的编号
 		num_mbal = max_mbal - (max_mbal % cur_leader.max_hosts);
 		our_mbal = num_mbal + cur_leader.max_hosts + token->host_id;
 	}
 
  retry_ballot:
-
+	/* 在这里可以节省一次IO，为什么能省？ */
 	if (copy_cur_leader) {
 		/* reusing the initial read removes an iop in the common case */
 		copy_cur_leader = 0;
@@ -2048,7 +2106,7 @@ int paxos_lease_acquire(struct task *task,
 		if (error < 0)
 			goto out;
 	}
-
+	/* 如果其他节点已经提交了leader信息 */
 	if (tmp_leader.lver == next_lver) {
 		/*
 		 * another host has commited a leader_record for next_lver,
@@ -2084,7 +2142,7 @@ int paxos_lease_acquire(struct task *task,
 		}
 		goto out;
 	}
-
+	/* 如果读到的leader version比我们即将要写入的version还要大，那当前是不是就只能重试了 */
 	if (tmp_leader.lver > next_lver) {
 		/*
 		 * A case where this was observed: for next_lver 65 we abort1, and delay.
@@ -2093,6 +2151,9 @@ int paxos_lease_acquire(struct task *task,
 		 * next_lver is 65, but the current lver on disk is 66, causing us to
 		 * we fail in the larger1 check.)
 		 */
+		/*
+		这里观察到的一种情况：对于 next_lver 65，我们执行了 abort1 并延迟。在睡眠期间，租约 v65（在我们的 abort1 过程中获得）被释放，然后重新作为 v66 获得。当我们转到 retry_ballot 时，我们的 next_lver 是 65，但磁盘上当前的 lver 是 66，导致我们在 larger1 检查中失败。
+		*/
 		log_token(token, "paxos_acquire %llu restart new lver %llu from "
 			  "%llu %llu %llu to %llu %llu %llu",
 			  (unsigned long long)next_lver,
@@ -2105,7 +2166,7 @@ int paxos_lease_acquire(struct task *task,
 			  (unsigned long long)tmp_leader.timestamp);
 		goto restart;
 	}
-
+	// 比较两个Leader是否相等，相等返回0
 	if (memcmp(&cur_leader, &tmp_leader, sizeof(struct leader_record))) {
 		log_token(token, "paxos_acquire %llu restart leader changed2 from "
 			  "%llu %llu %llu to %llu %llu %llu",
@@ -2118,10 +2179,11 @@ int paxos_lease_acquire(struct task *task,
 			  (unsigned long long)tmp_leader.timestamp);
 		goto restart;
 	}
-
+	// 这里进行选举
 	error = run_ballot(task, token, flags, cur_leader.num_hosts, next_lver, our_mbal, &dblock);
-
+	// 什么情况下需要重新进行选举？
 	if ((error == SANLK_DBLOCK_MBAL) || (error == SANLK_DBLOCK_LVER)) {
+		// 从1秒内随机睡眠
 		us = get_rand(0, 1000000);
 		if (us < 0)
 			us = token->host_id * 100;
@@ -2141,20 +2203,21 @@ int paxos_lease_acquire(struct task *task,
 	}
 
 	/* ballot success, commit next_lver with dblock values */
-
+	/* 选举成功，将dblock的值写入磁盘 */
 	memcpy(&new_leader, &cur_leader, sizeof(struct leader_record));
 	new_leader.lver = dblock.lver;
+	// 这三个值就是我们想写入的值
 	new_leader.owner_id = dblock.inp;
 	new_leader.owner_generation = dblock.inp2;
 	new_leader.timestamp = dblock.inp3;
-
+	// 写入之前的这三个值也记录了
 	new_leader.write_id = token->host_id;
 	new_leader.write_generation = token->host_generation;
 	new_leader.write_timestamp = monotime();
 
 	if (new_num_hosts)
 		new_leader.num_hosts = new_num_hosts;
-
+	// 这个判断语句说明什么？似乎是为了加速其他节点失败的判断
 	if (new_leader.owner_id == token->host_id) {
 		/*
 		 * The LFL_SHORT_HOLD flag is just a "hint" to help
@@ -2172,15 +2235,16 @@ int paxos_lease_acquire(struct task *task,
 	}
 
 	new_leader.checksum = 0; /* set after leader_record_out */
-
+	// 把新的leader写入磁盘，写入之后会修改checksum的值
 	error = write_new_leader(task, token, &new_leader, "paxos_acquire");
 	if (error < 0) {
 		/* See comment in run_ballot about this flag. */
+		/* 这里是为了不让自己升为Leader做的标识 */
 		token->flags |= T_RETRACT_PAXOS;
 		memcpy(leader_ret, &new_leader, sizeof(struct leader_record));
 		goto out;
 	}
-
+	// 判断leader.owner_id 跟xx是否相等
 	if (new_leader.owner_id != token->host_id) {
 		/* not a problem, but interesting to see */
 

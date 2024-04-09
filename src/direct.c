@@ -190,12 +190,15 @@ static int do_paxos_action(int action, struct task *task, int io_timeout, struct
 			if (rv < 0)
 				break;
 		}
+		// 512B
 		token->sector_size = sector_size;
+		// 1MB
 		token->align_size = align_size;
-
+		// 主机传入的host_id和generation放在了token中
 		token->host_id = local_host_id;
 		token->host_generation = local_host_generation;
-
+		// 这个leader_ret是最后返回回去的值吗？这个就是写入磁盘时new_leader的数据。
+		// 这个dblock是在外部定义，在内部使用吗？
 		rv = paxos_lease_acquire(task, token, 0, leader_ret, &dblock, 0, 0);
 		break;
 
